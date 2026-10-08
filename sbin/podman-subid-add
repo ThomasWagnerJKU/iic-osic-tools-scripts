@@ -116,6 +116,6 @@ done
 if [ "$REMOVE" = 1 ]; then
     echo "[HINT] Running containers of these users keep their IDs until they are stopped."
 else
-    echo "[HINT] Each of these users has to run \"podman system migrate\" once (with no containers running)."
+    echo "[HINT] Users who use Podman already have to run \"podman system migrate\" once (iic-osic-tools start does that itself)."
 fi
 exit $RC

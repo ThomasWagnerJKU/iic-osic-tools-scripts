@@ -81,6 +81,15 @@ _start () {
         echo "[HINT] Ask the admin to run \"iic-osic-tools-enable '$(id -un)'\"."
         return 1
     fi
+    # A Podman pause process started before the sub-UID range existed keeps
+    # the single mapping (one line in uid_map) until "podman system migrate"
+    if [ "$(podman unshare cat /proc/self/uid_map 2>/dev/null | wc -l)" -lt 2 ]; then
+        echo "[INFO] Podman still runs without the sub-UID range, running \"podman system migrate\" once."
+        if ! podman system migrate || [ "$(podman unshare cat /proc/self/uid_map 2>/dev/null | wc -l)" -lt 2 ]; then
+            echo "[ERROR] Podman cannot use the sub-UID range of $(id -un), please contact the admin."
+            return 1
+        fi
+    fi
     # Safety net against other programs on the port
     if [ "$(ss -ltnH "sport = :$PORT" 2>/dev/null)" ]; then
         echo "[ERROR] Port $PORT is used by another program, please contact the admin."

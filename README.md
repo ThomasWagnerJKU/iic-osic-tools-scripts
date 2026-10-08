@@ -142,8 +142,9 @@ other users; the sub-UID range stays (remove it with
 `podman-subid-add --remove user`).
 
 Quote AD user names (`'DOMAIN\jdoe'`), otherwise the shell removes the
-backslash. After a user got a new sub-UID range, they have to run
-`podman system migrate` once.
+backslash. A user who already used Podman before getting the sub-UID range
+needs `podman system migrate` once, so Podman picks up the range;
+`iic-osic-tools start` detects that and runs it itself.
 
 The range has 51 ports, so at most 51 users can be enabled at the same time.
 Change `PORT_MIN`/`PORT_MAX` in `/etc/iic-osic-tools/iic-osic-tools.conf` if you need more, and
@@ -271,7 +272,7 @@ never get one. `podman-subid-add` adds them:
 | Message                                                           | Cause and fix |
 |-------------------------------------------------------------------|---------------|
 | `has no port in /etc/iic-osic-tools/ports` / `has no sub-UID range` | User not enabled: `iic-osic-tools-enable user` |
-| `no subuid ranges found for user …`                               | Missing or numeric sub-UID entry: `iic-osic-tools-enable user`, then `podman system migrate` as the user |
+| `no subuid ranges found for user …`                               | Missing or numeric sub-UID entry: `iic-osic-tools-enable user`, then `podman system migrate` as the user (`iic-osic-tools start` does that itself) |
 | `runc create failed: … no mapping found for uid 0`                | Same as above |
 | `Image … not found in the shared store`                           | Store missing or not readable: run `iic-osic-tools-image-update`; as the user, `podman images` must list the image with `R/O true` |
 | `failed to get current user: user: unknown userid …`              | Old `iic-osic-tools` without `--passwd=false`, install the current version |
