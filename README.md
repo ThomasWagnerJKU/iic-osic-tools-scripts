@@ -63,6 +63,8 @@ Good to know:
 | `etc/containers/storage-iic-osic-tools.conf` | `/etc/containers/storage-iic-osic-tools.conf`    | Podman storage config with the shared image store        |
 | `etc/profile.d/iic-osic-tools.sh`            | `/etc/profile.d/iic-osic-tools.sh`               | Selects that config for `podman` in login shells         |
 | `etc/environment.d/50-iic-osic-tools.conf`   | `/etc/environment.d/50-iic-osic-tools.conf`      | Selects that config for Podman in systemd user services  |
+| `etc/iic-osic-tools/iic-osic-tools.conf`     | `/etc/iic-osic-tools/iic-osic-tools.conf`        | Local settings (port range, firewall zone), never overwritten |
+| `install.sh`                                 | –                                                | Installs or updates all of the above                     |
 
 Created at runtime: `/etc/iic-osic-tools/ports` (port assignments, by
 `iic-osic-tools-enable`), entries in `/etc/subuid` and `/etc/subgid` (by
@@ -78,17 +80,22 @@ Created at runtime: `/etc/iic-osic-tools/ports` (port assignments, by
 
 ```bash
 cd iic-osic-tools-scripts
-install -m 755 bin/iic-osic-tools                    /usr/local/bin/
-install -m 755 sbin/iic-osic-tools-enable            /usr/local/sbin/
-install -m 755 sbin/podman-subid-add                 /usr/local/sbin/
-install -m 755 sbin/iic-osic-tools-image-update      /usr/local/sbin/
-install -m 644 etc/containers/storage-iic-osic-tools.conf /etc/containers/
-install -m 644 etc/profile.d/iic-osic-tools.sh       /etc/profile.d/
-install -D -m 644 etc/environment.d/50-iic-osic-tools.conf /etc/environment.d/50-iic-osic-tools.conf
+./install.sh -n     # dry run: shows what would be installed (works as any user)
+./install.sh        # installs or updates all files
 ```
 
-`install` makes the files owned by root. **Keep it that way:** root runs the
-`sbin` scripts, so whoever can write them can run commands as root.
+`install.sh` copies all files to the places in the table above, owned by
+root, and skips files that are up to date. Run it again after every update
+of the repository. **Keep the files owned by root:** root runs the `sbin`
+scripts, so whoever can write them can run commands as root.
+
+Local settings go into `/etc/iic-osic-tools/iic-osic-tools.conf`, which
+`install.sh` creates once and never overwrites:
+
+| Setting               | Default | Meaning                                                        |
+|-----------------------|---------|----------------------------------------------------------------|
+| `PORT_MIN`/`PORT_MAX` | 50050/50100 | Range of the users' web ports                              |
+| `FW_ZONE`             | (empty) | firewalld zone of the users' interface, empty = default zone (`firewall-cmd --get-active-zones`) |
 
 Then create the shared image store (this pulls ~13 GB):
 
@@ -96,10 +103,6 @@ Then create the shared image store (this pulls ~13 GB):
 mkdir -p /var/local/eda/images && chown eda: /var/local/eda/images
 /usr/local/sbin/iic-osic-tools-image-update
 ```
-
-If `firewalld` is used and the users' network interface is not in the default
-zone, set `FW_ZONE` at the top of `/usr/local/sbin/iic-osic-tools-enable`
-(`firewall-cmd --get-active-zones` shows the zones).
 
 openSUSE's `sudo` does not search `/usr/local/sbin`, so call these scripts
 with their full path when you use `sudo`.
@@ -129,7 +132,7 @@ backslash. After a user got a new sub-UID range, they have to run
 `podman system migrate` once.
 
 The range has 51 ports, so at most 51 users can be enabled at the same time.
-Change `PORT_MIN`/`PORT_MAX` in `iic-osic-tools-enable` if you need more, and
+Change `PORT_MIN`/`PORT_MAX` in `/etc/iic-osic-tools/iic-osic-tools.conf` if you need more, and
 keep it clear of other services (the `eda_server_*` containers of
 IIC-OSIC-TOOLS use 50001 upwards).
 

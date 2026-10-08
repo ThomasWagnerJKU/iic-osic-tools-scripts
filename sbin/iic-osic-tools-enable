@@ -25,6 +25,11 @@ SUBID_ADD="$(dirname "$(readlink -f "$0")")/podman-subid-add"
 # the default zone
 FW_ZONE=""
 
+# Local settings (PORT_MIN, PORT_MAX, FW_ZONE) survive reinstallations there
+CONF_FILE="/etc/iic-osic-tools/iic-osic-tools.conf"
+# shellcheck source=/dev/null
+[ -r "$CONF_FILE" ] && . "$CONF_FILE"
+
 _usage () {
     echo "Usage: $0 [--disable] user [user ...]"
     echo
