@@ -34,8 +34,22 @@ in your browser to get the desktop with all EDA tools.
 
 Good to know:
 
-- **Your home directory is `/foss/designs` in the container.** Save your work
-  there. Everything else in the container is reset on every start.
+- **Save your work in `/foss/designs`.** It is the folder `~/iic-tools-data`
+  in your home directory on the host (and so also on your network home share).
+  Everything else in the container is reset on every start.
+- **`~/iic-tools-data` is private** (mode 0700), `iic-osic-tools start` sets
+  this on every start. Keep it that way: your Claude login is stored there.
+- **Claude Code** can be installed in the container once, in a terminal of the
+  desktop:
+
+  ```bash
+  curl -fsSL https://claude.ai/install.sh | bash
+  ```
+
+  The `claude` command, its updates, your settings and your login are kept in
+  `~/iic-tools-data` (in `.claude`, `.claude-bin` and `.claude-versions`,
+  about 250 MB) and survive restarts. It is separate from a Claude Code you
+  may use on the host itself.
 - **Your password and port stay the same** across restarts. The password is
   stored in `~/.config/iic-osic-tools/vnc.env`. Do not share the URL, it
   contains the password.
@@ -182,7 +196,11 @@ podman run -d --rm --replace --pull=never --name iic-osic-tools-<user> \
     --security-opt seccomp=unconfined \
     --sysctl net.ipv4.ip_unprivileged_port_start=0 \
     -p <port>:80 --env-file ~/.config/iic-osic-tools/vnc.env \
-    -v "$HOME:/foss/designs:rw" docker.io/hpretl/iic-osic-tools:latest
+    -e CLAUDE_CONFIG_DIR=/foss/designs/.claude -e PATH=<image PATH>:/headless/.local/bin \
+    -v ~/iic-tools-data:/foss/designs:rw \
+    -v ~/iic-tools-data/.claude-bin:/headless/.local/bin:rw \
+    -v ~/iic-tools-data/.claude-versions:/headless/.local/share/claude:rw \
+    docker.io/hpretl/iic-osic-tools:latest
 ```
 
 - `--userns=keep-id` keeps the user's UID in the container, so files in
@@ -194,7 +212,21 @@ podman run -d --rm --replace --pull=never --name iic-osic-tools-<user> \
 - `--pull=never`: a missing shared image is a setup problem, and a pull would
   put a private 13 GB copy into the user's home.
 - `--rm --replace`: every start creates a fresh container and so picks up image
-  updates; only `$HOME` persists.
+  updates; only `~/iic-tools-data` persists. The container's own home
+  (`/headless`) comes from the image and holds the desktop and tool settings
+  of the image (Xfce, `.bashrc`, KLayout plugins, the Veryl toolchain, …).
+- `~/iic-tools-data` has mode 0700. The host, the container (thanks to
+  `keep-id`) and Samba (which accesses files as the logged-in user) all work
+  as the same Unix user, so no group or ACL settings are needed. 0750 would
+  not be private: domain users share one primary group.
+- Claude Code: `CLAUDE_CONFIG_DIR` moves `~/.claude` and `~/.claude.json`. The
+  native installer always puts the `claude` command into `~/.local/bin`
+  (`/headless/.local/bin`) and the versions into `$XDG_DATA_HOME/claude`.
+  `XDG_DATA_HOME` is not changed for the whole container, as other tools of the
+  image keep data in `/headless/.local/share`; instead, only these two
+  directories are mounted from `~/iic-tools-data`.
+- The VNC password stays in `~/.config/iic-osic-tools` on the host, outside
+  `~/iic-tools-data`, so it is not visible in the container.
 - Container names allow only `[a-zA-Z0-9_.-]`, so `DOMAIN\jdoe` becomes
   `iic-osic-tools-DOMAIN_jdoe`.
 

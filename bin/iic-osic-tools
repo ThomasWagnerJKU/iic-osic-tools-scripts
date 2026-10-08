@@ -5,7 +5,9 @@
 # Usage: iic-osic-tools [start|stop|status|url|newpw]
 #
 # The image comes from the shared read-only store /var/local/eda/images
-# (see /etc/containers/storage-iic-osic-tools.conf), $HOME is mounted as /foss/designs.
+# (see /etc/containers/storage-iic-osic-tools.conf). $HOME/iic-tools-data
+# is mounted as /foss/designs, the only persistent place in the container,
+# and holds the Claude Code configuration and program files as well.
 # A VNC password is generated on the first start and reused afterwards.
 #
 # SPDX-FileCopyrightText: 2026 Thomas Wagner, Johannes Kepler University
@@ -22,6 +24,9 @@ NAME="iic-osic-tools-$(id -un | tr -c 'a-zA-Z0-9_.\n-' '_')"
 # Fixed web port per user, assigned by the admin with iic-osic-tools-enable
 PORTS_FILE="/etc/iic-osic-tools/ports"
 PORT=$(N="$(id -un)" awk -F: '$1 == ENVIRON["N"] { print $2; exit }' "$PORTS_FILE" 2>/dev/null)
+# Persistent data, private to the user (also over the Samba home share)
+DATA_DIR="$HOME/iic-tools-data"
+# Outside DATA_DIR, so the VNC password is not visible in the container
 CONF_DIR="$HOME/.config/iic-osic-tools"
 PW_FILE="$CONF_DIR/vnc.env"
 
@@ -43,6 +48,18 @@ _make_password () {
         pw=$(head -c 256 /dev/urandom | base64 | tr -dc A-Za-z0-9 | cut -c1-20)
         ( umask 077 && echo "VNC_PW=$pw" > "$PW_FILE" )
         echo "[INFO] New VNC password generated."
+    fi
+}
+
+# DATA_DIR with mode 0700: the primary group of domain users contains all
+# users, so 0750 would not be private either. The two Claude directories
+# keep the claude command ($HOME/.local/bin, fixed) and the installed
+# versions ($XDG_DATA_HOME/claude, not changed for the whole container, as
+# the image keeps other tools' data in /headless/.local/share).
+_make_data_dir () {
+    if ! mkdir -p "$DATA_DIR/.claude-bin" "$DATA_DIR/.claude-versions" || ! chmod 700 "$DATA_DIR"; then
+        echo "[ERROR] Could not create $DATA_DIR."
+        return 1
     fi
 }
 
@@ -76,6 +93,11 @@ _start () {
         return 1
     fi
     _make_password || return 1
+    _make_data_dir || return 1
+    # The claude command (always $HOME/.local/bin/claude) in the PATH, which
+    # replaces the PATH of the image, so that is kept
+    local img_path
+    img_path=$(podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^PATH=//p')
     # Without lingering systemd stops the container when the user logs out
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         if loginctl enable-linger 2>/dev/null; then
@@ -84,8 +106,10 @@ _start () {
             echo "[WARNING] Could not enable lingering, the container may stop at logout."
         fi
     fi
-    # A new container on every start picks up image updates, only $HOME
-    # (mounted as /foss/designs) is kept. The password is passed via
+    # A new container on every start picks up image updates, only DATA_DIR
+    # (mounted as /foss/designs) is kept. Claude Code keeps its config in
+    # /foss/designs/.claude (CLAUDE_CONFIG_DIR) and its program in the
+    # two extra mounts, see _make_data_dir. The password is passed via
     # --env-file, so it does not show up in "ps". --passwd=false: AD
     # (winbind) users cannot be looked up inside the user namespace, which
     # keep-id would do for an /etc/passwd entry; the image needs none.
@@ -96,7 +120,11 @@ _start () {
             -p "$PORT:80" \
             --env-file "$PW_FILE" \
             -e XKB_KEYBOARD_LAYOUT="${XKB_KEYBOARD_LAYOUT:-us}" \
-            -v "$HOME:/foss/designs:rw" \
+            -e CLAUDE_CONFIG_DIR=/foss/designs/.claude \
+            -e PATH="${img_path:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}:/headless/.local/bin" \
+            -v "$DATA_DIR:/foss/designs:rw" \
+            -v "$DATA_DIR/.claude-bin:/headless/.local/bin:rw" \
+            -v "$DATA_DIR/.claude-versions:/headless/.local/share/claude:rw" \
             "$IMAGE" > /dev/null; then
         echo "[ERROR] Could not start container $NAME."
         return 1
