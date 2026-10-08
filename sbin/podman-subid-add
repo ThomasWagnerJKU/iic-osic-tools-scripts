@@ -1,0 +1,121 @@
+#!/bin/bash
+# ========================================================================
+# Gives users a subordinate UID/GID range in /etc/subuid and /etc/subgid,
+# which rootless Podman needs to run images with more than one user ID.
+#
+# NOTE: This allows the user to run ANY image with rootless Podman, not
+# only IIC-OSIC-TOOLS. It grants no privileges on the host though, the
+# range only holds otherwise unused IDs for the user's own containers.
+#
+# Works for local and winbind (AD) users. The entries use the user name,
+# Podman looks the range up by name for --userns=keep-id (a numeric UID
+# entry is only honored by newuidmap). Numeric entries are converted.
+#
+# Usage (as root): podman-subid-add [--remove] user [user ...]
+#
+# SPDX-FileCopyrightText: 2026 Thomas Wagner, Johannes Kepler University
+# SPDX-License-Identifier: Apache-2.0
+# ========================================================================
+
+SUBUID_FILE="/etc/subuid"
+SUBGID_FILE="/etc/subgid"
+LOCK_FILE="/run/lock/podman-subid-add.lock"
+# First sub-ID, above all host IDs (winbind ranges end at 99999), the
+# local ranges from useradd and the dockremap range
+MIN_START=1000000
+
+_usage () {
+    echo "Usage: $0 [--remove] user [user ...]"
+    echo
+    echo "       Adds (or with --remove deletes) a sub-UID/GID range for rootless Podman."
+    echo "       Note: this allows the user to run any image with rootless Podman."
+}
+
+REMOVE=0
+case "${1:-}" in
+    -h|--help) _usage; exit 0 ;;
+    --remove)  REMOVE=1; shift ;;
+esac
+if [ $# -eq 0 ]; then
+    _usage
+    exit 1
+fi
+if [ "$(id -u)" != 0 ]; then
+    echo "[ERROR] Please run as root."
+    exit 1
+fi
+
+# Serialize concurrent runs, the files are read and then appended to
+exec 9> "$LOCK_FILE"
+flock 9
+
+# Next free start in a sub-ID file, after the highest range in use
+_next_start () {
+    awk -F: -v min="$MIN_START" '
+        $3 > 0 && $2 + $3 > max { max = $2 + $3 }
+        END { print (max > min ? max : min) }' "$1"
+}
+
+# True if the file has a line whose owner field is exactly $2
+_has_owner () {
+    N="$2" awk -F: '$1 == ENVIRON["N"] { f = 1 } END { exit !f }' "$1"
+}
+
+# Rewrite the file with the lines of owner $2 renamed to $3, or deleted
+# if $3 is empty; keeps the file itself (owner, mode, SELinux label)
+_rewrite () {
+    local file="$1" from="$2" to="$3"
+    F="$from" T="$to" awk -F: -v OFS=: '
+        $1 == ENVIRON["F"] { if (ENVIRON["T"] == "") next; $1 = ENVIRON["T"] }
+        { print }' "$file" > "$file.tmp" && cat "$file.tmp" > "$file" && rm -f "$file.tmp"
+}
+
+RC=0
+for user in "$@"; do
+    if ! uid=$(id -u "$user" 2>/dev/null); then
+        echo "[ERROR] User $user not found, skipping."
+        RC=1
+        continue
+    fi
+    name=$(id -un "$user")
+    gid=$(id -g "$user")
+    # keep-id maps the container IDs 0..UID-1 into the range, so it must
+    # be larger than the UID and GID of the user (AD IDs go up to 99999)
+    size=65536
+    [ "$uid" -ge "$size" ] && size=$((uid + 1))
+    [ "$gid" -ge "$size" ] && size=$((gid + 1))
+
+    for file in "$SUBUID_FILE" "$SUBGID_FILE"; do
+        touch "$file"
+        if [ "$REMOVE" = 1 ]; then
+            if _has_owner "$file" "$name" || _has_owner "$file" "$uid"; then
+                _rewrite "$file" "$name" ""
+                _rewrite "$file" "$uid" ""
+                echo "[INFO] Removed the range of $name from $file."
+            else
+                echo "[INFO] $name has no range in $file."
+            fi
+        elif _has_owner "$file" "$name"; then
+            echo "[INFO] $name has a range in $file already."
+            # A second entry by UID would make Podman use the range twice
+            if _has_owner "$file" "$uid"; then
+                _rewrite "$file" "$uid" ""
+                echo "[INFO] Removed the duplicate entry by UID $uid from $file."
+            fi
+        elif _has_owner "$file" "$uid"; then
+            _rewrite "$file" "$uid" "$name"
+            echo "[INFO] Converted the entry of $name in $file from UID $uid to the user name."
+        else
+            start=$(_next_start "$file")
+            printf '%s:%s:%s\n' "$name" "$start" "$size" >> "$file"
+            echo "[INFO] Added $name:$start:$size to $file."
+        fi
+    done
+done
+
+if [ "$REMOVE" = 1 ]; then
+    echo "[HINT] Running containers of these users keep their IDs until they are stopped."
+else
+    echo "[HINT] Each of these users has to run \"podman system migrate\" once (with no containers running)."
+fi
+exit $RC

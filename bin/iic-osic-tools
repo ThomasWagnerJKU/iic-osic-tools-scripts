@@ -1,0 +1,121 @@
+#!/bin/bash
+# ========================================================================
+# Starts a personal IIC-OSIC-TOOLS VNC container for the calling user
+#
+# Usage: iic-osic-tools [start|stop|status|url|newpw]
+#
+# The image comes from the shared read-only store /var/local/eda/images
+# (see /etc/containers/storage-iic-osic-tools.conf), $HOME is mounted as /foss/designs.
+# A VNC password is generated on the first start and reused afterwards.
+#
+# SPDX-FileCopyrightText: 2026 Thomas Wagner, Johannes Kepler University
+# SPDX-License-Identifier: Apache-2.0
+# ========================================================================
+
+# Rootless Podman ignores the image stores of /etc/containers/storage.conf,
+# so the shared store has its own config (also set in /etc/profile.d)
+export CONTAINERS_STORAGE_CONF="${CONTAINERS_STORAGE_CONF:-/etc/containers/storage-iic-osic-tools.conf}"
+
+IMAGE="docker.io/hpretl/iic-osic-tools:latest"
+# Container names allow only [a-zA-Z0-9_.-], so e.g. "DOMAIN\user" becomes "DOMAIN_user"
+NAME="iic-osic-tools-$(id -un | tr -c 'a-zA-Z0-9_.\n-' '_')"
+# Fixed web port per user, assigned by the admin with iic-osic-tools-enable
+PORTS_FILE="/etc/iic-osic-tools/ports"
+PORT=$(N="$(id -un)" awk -F: '$1 == ENVIRON["N"] { print $2; exit }' "$PORTS_FILE" 2>/dev/null)
+CONF_DIR="$HOME/.config/iic-osic-tools"
+PW_FILE="$CONF_DIR/vnc.env"
+
+_url () {
+    local host pw
+    host=$(hostname -f 2>/dev/null || hostname)
+    pw=$(sed -n 's/^VNC_PW=//p' "$PW_FILE" 2>/dev/null)
+    echo "http://$host:$PORT/?password=$pw"
+}
+
+_running () {
+    [ "$(podman ps -q -f name="^${NAME}\$" 2>/dev/null)" ]
+}
+
+_make_password () {
+    mkdir -p "$CONF_DIR" && chmod 700 "$CONF_DIR"
+    if [ ! -s "$PW_FILE" ]; then
+        local pw
+        pw=$(head -c 256 /dev/urandom | base64 | tr -dc A-Za-z0-9 | cut -c1-20)
+        ( umask 077 && echo "VNC_PW=$pw" > "$PW_FILE" )
+        echo "[INFO] New VNC password generated."
+    fi
+}
+
+_start () {
+    if _running; then
+        echo "[INFO] Container $NAME is already running."
+        echo "[INFO] Open $(_url)"
+        return 0
+    fi
+    # Rootless Podman needs a sub-UID/GID range (by user name) for this
+    # image, and the user a port; both come from iic-osic-tools-enable
+    if [ -z "$PORT" ]; then
+        echo "[ERROR] User $(id -un) has no port in $PORTS_FILE."
+        echo "[HINT] Ask the admin to run \"iic-osic-tools-enable '$(id -un)'\"."
+        return 1
+    fi
+    if ! N="$(id -un)" awk -F: '$1 == ENVIRON["N"] { f = 1 } END { exit !f }' /etc/subuid 2>/dev/null; then
+        echo "[ERROR] User $(id -un) has no sub-UID range in /etc/subuid."
+        echo "[HINT] Ask the admin to run \"iic-osic-tools-enable '$(id -un)'\"."
+        return 1
+    fi
+    # Safety net against other programs on the port
+    if [ "$(ss -ltnH "sport = :$PORT" 2>/dev/null)" ]; then
+        echo "[ERROR] Port $PORT is used by another program, please contact the admin."
+        return 1
+    fi
+    # Never pull here: a missing shared image means a setup problem, and a
+    # pull would put a private 13 GB copy into the user's home
+    if ! podman image exists "$IMAGE"; then
+        echo "[ERROR] Image $IMAGE not found in the shared store, please contact the admin."
+        return 1
+    fi
+    _make_password || return 1
+    # Without lingering systemd stops the container when the user logs out
+    if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+        if loginctl enable-linger 2>/dev/null; then
+            echo "[INFO] Lingering enabled, the container keeps running after logout."
+        else
+            echo "[WARNING] Could not enable lingering, the container may stop at logout."
+        fi
+    fi
+    # A new container on every start picks up image updates, only $HOME
+    # (mounted as /foss/designs) is kept. The password is passed via
+    # --env-file, so it does not show up in "ps". --passwd=false: AD
+    # (winbind) users cannot be looked up inside the user namespace, which
+    # keep-id would do for an /etc/passwd entry; the image needs none.
+    if ! podman run -d --rm --replace --pull=never --name "$NAME" \
+            --user "$(id -u):$(id -g)" --userns=keep-id --passwd=false \
+            --security-opt seccomp=unconfined \
+            --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+            -p "$PORT:80" \
+            --env-file "$PW_FILE" \
+            -e XKB_KEYBOARD_LAYOUT="${XKB_KEYBOARD_LAYOUT:-us}" \
+            -v "$HOME:/foss/designs:rw" \
+            "$IMAGE" > /dev/null; then
+        echo "[ERROR] Could not start container $NAME."
+        return 1
+    fi
+    sleep 3
+    if ! _running; then
+        echo "[ERROR] Container $NAME stopped right after the start, see \"podman logs $NAME\"."
+        return 1
+    fi
+    echo "[INFO] Container $NAME started."
+    echo "[INFO] Open $(_url)"
+}
+
+case "${1:-start}" in
+    start)  _start ;;
+    stop)   podman stop --ignore -t 10 "$NAME" > /dev/null && echo "[INFO] Container $NAME stopped." ;;
+    status) if _running; then echo "[INFO] Running: $(_url)"; else echo "[INFO] Not running."; fi ;;
+    url)    if [ -n "$PORT" ]; then _url; else echo "[ERROR] User $(id -un) has no port in $PORTS_FILE."; exit 1; fi ;;
+    newpw)  rm -f "$PW_FILE"; _make_password
+            _running && echo "[HINT] Run \"$0 stop\" and \"$0 start\" to use the new password." ;;
+    *)      echo "Usage: $0 [start|stop|status|url|newpw]"; exit 1 ;;
+esac

@@ -1,0 +1,154 @@
+#!/bin/bash
+# ========================================================================
+# Enables users for iic-osic-tools (the personal IIC-OSIC-TOOLS VNC
+# container): gives them a sub-UID/GID range via podman-subid-add, if
+# they have none yet, and a fixed web port from PORT_MIN..PORT_MAX in
+# PORTS_FILE. The port stays reserved until --disable.
+#
+# The port is opened in firewalld (runtime and permanent) for each enabled
+# user, and closed again with --disable. Running the script again for a
+# user repairs a missing firewall rule. Without a running firewalld the
+# firewall part is skipped with a warning.
+#
+# Usage (as root): iic-osic-tools-enable [--disable] user [user ...]
+#
+# SPDX-FileCopyrightText: 2026 Thomas Wagner, Johannes Kepler University
+# SPDX-License-Identifier: Apache-2.0
+# ========================================================================
+
+PORTS_FILE="/etc/iic-osic-tools/ports"
+PORT_MIN=50050
+PORT_MAX=50100
+SUBUID_FILE="/etc/subuid"
+SUBID_ADD="$(dirname "$(readlink -f "$0")")/podman-subid-add"
+# firewalld zone of the interface the users connect through, empty for
+# the default zone
+FW_ZONE=""
+
+_usage () {
+    echo "Usage: $0 [--disable] user [user ...]"
+    echo
+    echo "       Enables users for iic-osic-tools: sub-UID/GID range (via podman-subid-add)"
+    echo "       and a fixed web port from $PORT_MIN-$PORT_MAX, which is opened in firewalld."
+    echo "       --disable frees and closes the port again, the sub-UID/GID range is kept"
+    echo "       (remove it with \"podman-subid-add --remove user\")."
+}
+
+DISABLE=0
+case "${1:-}" in
+    -h|--help) _usage; exit 0 ;;
+    --disable) DISABLE=1; shift ;;
+esac
+if [ $# -eq 0 ]; then
+    _usage
+    exit 1
+fi
+if [ "$(id -u)" != 0 ]; then
+    echo "[ERROR] Please run as root."
+    exit 1
+fi
+
+mkdir -p "$(dirname "$PORTS_FILE")"
+touch "$PORTS_FILE"
+chmod 644 "$PORTS_FILE"
+
+# Serialize concurrent runs, the file is read and then appended to
+exec 9>> "$PORTS_FILE"
+flock 9
+
+# Port of user $1 from the ports file, empty if there is none
+_port_of () {
+    N="$1" awk -F: '$1 == ENVIRON["N"] { print $2; exit }' "$PORTS_FILE"
+}
+
+# Lowest port in the range that is neither assigned nor in use
+_free_port () {
+    local port
+    for port in $(seq "$PORT_MIN" "$PORT_MAX"); do
+        P="$port" awk -F: '$2 == ENVIRON["P"] { f = 1 } END { exit !f }' "$PORTS_FILE" && continue
+        [ "$(ss -ltnH "sport = :$port" 2>/dev/null)" ] && continue
+        echo "$port"
+        return 0
+    done
+    return 1
+}
+
+# Open ($1 = add) or close ($1 = remove) TCP port $2 in firewalld, both in
+# the runtime and the permanent configuration. Returns 1 on errors.
+FW_OK=""
+_firewall () {
+    local action="$1" port="$2" perm zone=()
+    [ -n "$FW_ZONE" ] && zone=(--zone="$FW_ZONE")
+    if [ -z "$FW_OK" ]; then
+        if command -v firewall-cmd > /dev/null 2>&1 && firewall-cmd -q --state 2> /dev/null; then
+            FW_OK=1
+        else
+            FW_OK=0
+            echo "[WARNING] firewalld is not running, the firewall is left unchanged."
+        fi
+    fi
+    [ "$FW_OK" = 1 ] || return 0
+
+    for perm in "" "--permanent"; do
+        # Query first, firewall-cmd warns about ports that are open already
+        if firewall-cmd -q "${zone[@]}" $perm --query-port="$port/tcp"; then
+            [ "$action" = add ] && continue
+        else
+            [ "$action" = remove ] && continue
+        fi
+        if ! firewall-cmd -q "${zone[@]}" $perm --"$action"-port="$port/tcp"; then
+            echo "[ERROR] firewall-cmd --$action-port=$port/tcp ${perm:-(runtime)} failed!"
+            return 1
+        fi
+    done
+    if [ "$action" = add ]; then
+        echo "[INFO] Port $port/tcp is open in the firewall."
+    else
+        echo "[INFO] Port $port/tcp is closed in the firewall."
+    fi
+}
+
+RC=0
+for user in "$@"; do
+    if ! name=$(id -un "$user" 2>/dev/null); then
+        echo "[ERROR] User $user not found, skipping."
+        RC=1
+        continue
+    fi
+    port=$(_port_of "$name")
+
+    if [ "$DISABLE" = 1 ]; then
+        if [ -n "$port" ]; then
+            _firewall remove "$port" || RC=1
+            N="$name" awk -F: '$1 != ENVIRON["N"]' "$PORTS_FILE" > "$PORTS_FILE.tmp" && \
+                cat "$PORTS_FILE.tmp" > "$PORTS_FILE" && rm -f "$PORTS_FILE.tmp"
+            echo "[INFO] Port $port of $name is free again."
+        else
+            echo "[INFO] $name has no port."
+        fi
+        continue
+    fi
+
+    # Sub-UID/GID range first, without it the container cannot start
+    if ! N="$name" awk -F: '$1 == ENVIRON["N"] { f = 1 } END { exit !f }' "$SUBUID_FILE" 2>/dev/null; then
+        if ! "$SUBID_ADD" "$name"; then
+            echo "[ERROR] Could not add a sub-UID/GID range for $name, skipping."
+            RC=1
+            continue
+        fi
+    fi
+
+    if [ -n "$port" ]; then
+        echo "[INFO] $name has port $port already."
+    elif port=$(_free_port); then
+        printf '%s:%s\n' "$name" "$port" >> "$PORTS_FILE"
+        echo "[INFO] Assigned port $port to $name."
+    else
+        echo "[ERROR] No free port left in $PORT_MIN-$PORT_MAX for $name!"
+        echo "[HINT] Free ports of users who no longer need them with \"$0 --disable user\"."
+        RC=1
+        continue
+    fi
+    _firewall add "$port" || RC=1
+done
+exit $RC

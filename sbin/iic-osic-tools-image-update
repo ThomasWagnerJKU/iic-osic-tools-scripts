@@ -1,0 +1,67 @@
+#!/bin/bash
+# ========================================================================
+# Pulls or updates the IIC-OSIC-TOOLS image in the shared read-only image
+# store, which all users of iic-osic-tools run their containers from.
+#
+# The store belongs to user eda (rootless Podman). force_mask = "shared"
+# stores all image files readable for everyone and keeps the real modes
+# and owners in an extended attribute, which fuse-overlayfs applies in
+# the containers. Afterwards the store metadata is made readable too.
+#
+# Usage: iic-osic-tools-image-update [image]   (as eda, or as root)
+#
+# SPDX-FileCopyrightText: 2026 Thomas Wagner, Johannes Kepler University
+# SPDX-License-Identifier: Apache-2.0
+# ========================================================================
+
+STORE="/var/local/eda/images"
+STORE_USER="eda"
+IMAGE="${1:-docker.io/hpretl/iic-osic-tools:latest}"
+
+# Run as the owner of the store, also when called by root
+if [ "$(id -un)" != "$STORE_USER" ]; then
+    if [ "$(id -u)" != 0 ]; then
+        echo "[ERROR] Please run as $STORE_USER or root."
+        exit 1
+    fi
+    exec sudo -u "$STORE_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$STORE_USER")" "$0" "$@"
+fi
+
+# Without a systemd user session (e.g. via sudo) Podman falls back to a
+# runtime directory in /tmp, which breaks after a reboot
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    echo "[ERROR] $XDG_RUNTIME_DIR does not exist, enable lingering for $STORE_USER (loginctl enable-linger $STORE_USER)."
+    exit 1
+fi
+
+# The same storage options on every call (the store was created with this
+# runroot, Podman refuses others), layers pulled without
+# force_mask would not be readable for the other users
+PODMAN=(podman --root "$STORE" --runroot "$XDG_RUNTIME_DIR/containers"
+        --storage-opt overlay.mount_program=/usr/bin/fuse-overlayfs
+        --storage-opt overlay.force_mask=shared)
+
+OLD_ID=$("${PODMAN[@]}" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null)
+if ! "${PODMAN[@]}" pull "$IMAGE"; then
+    echo "[ERROR] Pulling $IMAGE failed."
+    exit 1
+fi
+NEW_ID=$("${PODMAN[@]}" image inspect --format '{{.Id}}' "$IMAGE")
+
+# Store directories and metadata are created 0700/0600
+if ! chmod -R a+rX "$STORE"; then
+    echo "[ERROR] Could not make $STORE readable for all users."
+    exit 1
+fi
+
+if [ "$OLD_ID" = "$NEW_ID" ]; then
+    echo "[INFO] $IMAGE is up to date."
+else
+    echo "[INFO] $IMAGE updated to ${NEW_ID:0:12}."
+    echo "[HINT] Users get the new image with \"iic-osic-tools stop\" and \"iic-osic-tools start\"."
+    if [ -n "$OLD_ID" ]; then
+        echo "[HINT] Remove the old image ${OLD_ID:0:12} only when no container uses it any more:"
+        echo "[HINT]   ${PODMAN[*]} rmi ${OLD_ID:0:12}"
+    fi
+fi
