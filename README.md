@@ -276,6 +276,7 @@ never get one. `podman-subid-add` adds them:
 | `Image … not found in the shared store`                           | Store missing or not readable: run `iic-osic-tools-image-update`; as the user, `podman images` must list the image with `R/O true` |
 | `failed to get current user: user: unknown userid …`              | Old `iic-osic-tools` without `--passwd=false`, install the current version |
 | `current system boot ID differs from cached boot ID`              | A Podman runtime directory in `/tmp` survived a reboot. Run Podman with `XDG_RUNTIME_DIR=/run/user/<uid>` (lingering on), or delete the directories named in the message |
+| The URL times out from other computers, but works on the host or through `ssh -L <port>:localhost:<port>` | The port is not open in firewalld (e.g. assigned before the firewall support, or in the wrong zone): run `iic-osic-tools-enable user` again, check `FW_ZONE` and `firewall-cmd --get-active-zones` |
 | The image was pulled into the user's home                         | The user's Podman does not see the shared store: check `podman info --format '{{.Store.ConfigFile}}'` and `CONTAINERS_STORAGE_CONF`; a personal `~/.config/containers/storage.conf` is ignored while the variable is set |
 
 ---
