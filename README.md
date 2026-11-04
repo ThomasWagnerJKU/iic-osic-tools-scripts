@@ -28,7 +28,7 @@ in your browser to get the desktop with all EDA tools.
 |-------------------------|------------------------------------------------------------|
 | `iic-osic-tools start`  | Starts your container, or shows the URL if it is running   |
 | `iic-osic-tools stop`   | Stops your container                                       |
-| `iic-osic-tools status` | Shows whether your container is running                    |
+| `iic-osic-tools status` | Shows whether your container is running, and whether a newer image is available |
 | `iic-osic-tools url`    | Prints your URL (with the password) again                  |
 | `iic-osic-tools newpw`  | Creates a new password (takes effect after stop and start) |
 
@@ -59,6 +59,10 @@ Good to know:
 - **If you get "Port … is used by another program"**, someone else is
   listening on your port. Tell the admin, and run `iic-osic-tools newpw`
   before you open your URL again.
+- **After an image update**, your running container keeps the old version.
+  `iic-osic-tools status` (and `start` while it runs) tells you so; restart
+  with `iic-osic-tools stop` and `iic-osic-tools start` to get the new one.
+  Your files in `~/iic-tools-data` are kept.
 - **If you get "has no port" or "has no sub-UID range"**, your account is not
   enabled yet. Ask the admin.
 
@@ -154,12 +158,23 @@ IIC-OSIC-TOOLS use 50001 upwards).
 ### Updating the image
 
 ```bash
-/usr/local/sbin/iic-osic-tools-image-update     # as root or as eda
+/usr/local/sbin/iic-osic-tools-image-update           # as root or as eda
+/usr/local/sbin/iic-osic-tools-image-update --check   # only list outdated containers
 ```
 
 It pulls `docker.io/hpretl/iic-osic-tools:latest` into the shared store and
 makes it readable for all users. Running containers keep the old image; users
-get the new one with `iic-osic-tools stop` and `iic-osic-tools start`.
+get the new one with `iic-osic-tools stop` and `iic-osic-tools start`. The
+script then lists the users whose containers still run an older image of the
+store (`--check` only does that). It finds them through their
+`fuse-overlayfs` processes, whose first `lowerdir` is the top layer of the
+image; this needs `/proc` without `hidepid`.
+
+`iic-osic-tools` starts containers by the ID of the image in the shared store,
+not by name: a private copy of an older image in a user's own store (e.g. from
+an earlier `podman pull`) would otherwise win over the shared image. Users can
+remove such a copy with `podman rmi <id>` (`podman images` shows it with
+`R/O false`) to free its space.
 
 **Never call a plain `podman pull` or `podman --root /var/local/eda/images pull`
 for the store**, always use this script: layers pulled without its options are
@@ -277,6 +292,7 @@ never get one. `podman-subid-add` adds them:
 | `Image … not found in the shared store`                           | Store missing or not readable: run `iic-osic-tools-image-update`; as the user, `podman images` must list the image with `R/O true` |
 | `failed to get current user: user: unknown userid …`              | Old `iic-osic-tools` without `--passwd=false`, install the current version |
 | `current system boot ID differs from cached boot ID`              | A Podman runtime directory in `/tmp` survived a reboot. Run Podman with `XDG_RUNTIME_DIR=/run/user/<uid>` (lingering on), or delete the directories named in the message |
+| `IIC_OSIC_TOOLS_VERSION` in the container is older than the shared image | The container was started before the update: `iic-osic-tools stop` and `start`. `iic-osic-tools-image-update --check` lists all such users |
 | The URL times out from other computers, but works on the host or through `ssh -L <port>:localhost:<port>` | The port is not open in firewalld (e.g. assigned before the firewall support, or in the wrong zone): run `iic-osic-tools-enable user` again, check `FW_ZONE` and `firewall-cmd --get-active-zones` |
 | The image was pulled into the user's home                         | The user's Podman does not see the shared store: check `podman info --format '{{.Store.ConfigFile}}'` and `CONTAINERS_STORAGE_CONF`; a personal `~/.config/containers/storage.conf` is ignored while the variable is set |
 

@@ -41,6 +41,25 @@ _running () {
     [ "$(podman ps -q -f name="^${NAME}\$" 2>/dev/null)" ]
 }
 
+# ID of IMAGE in the shared read-only store. The container is started by
+# this ID: by name, a private copy of an older image in the user's own
+# store (e.g. from an earlier pull) would win over the shared one.
+_shared_image_id () {
+    podman images --no-trunc --filter reference="$IMAGE" --format '{{.ID}} {{.ReadOnly}} {{.Repository}}:{{.Tag}}' 2>/dev/null |
+        I="$IMAGE" awk '$2 == "true" && $3 == ENVIRON["I"] { sub(/^sha256:/, "", $1); print $1; exit }'
+}
+
+# Warn if the running container uses an older image than the current one
+_check_image () {
+    local running current
+    running=$(podman container inspect --format '{{.Image}}' "$NAME" 2>/dev/null)
+    current=$(_shared_image_id)
+    if [ -n "$running" ] && [ -n "$current" ] && [ "$running" != "$current" ]; then
+        echo "[WARNING] Your container runs an older image (${running:0:12}), the current one is ${current:0:12}."
+        echo "[HINT] Get the new image with \"$(basename "$0") stop\" and \"$(basename "$0") start\", files in ~/iic-tools-data are kept."
+    fi
+}
+
 _make_password () {
     mkdir -p "$CONF_DIR" && chmod 700 "$CONF_DIR"
     if [ ! -s "$PW_FILE" ]; then
@@ -67,6 +86,7 @@ _start () {
     if _running; then
         echo "[INFO] Container $NAME is already running."
         echo "[INFO] Open $(_url)"
+        _check_image
         return 0
     fi
     # Rootless Podman needs a sub-UID/GID range (by user name) for this
@@ -97,7 +117,9 @@ _start () {
     fi
     # Never pull here: a missing shared image means a setup problem, and a
     # pull would put a private 13 GB copy into the user's home
-    if ! podman image exists "$IMAGE"; then
+    local image_id
+    image_id=$(_shared_image_id)
+    if [ -z "$image_id" ]; then
         echo "[ERROR] Image $IMAGE not found in the shared store, please contact the admin."
         return 1
     fi
@@ -106,7 +128,7 @@ _start () {
     # The claude command (always $HOME/.local/bin/claude) in the PATH, which
     # replaces the PATH of the image, so that is kept
     local img_path
-    img_path=$(podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^PATH=//p')
+    img_path=$(podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image_id" | sed -n 's/^PATH=//p')
     # Without lingering systemd stops the container when the user logs out
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
         if loginctl enable-linger 2>/dev/null; then
@@ -134,7 +156,7 @@ _start () {
             -v "$DATA_DIR:/foss/designs:rw" \
             -v "$DATA_DIR/.claude-bin:/headless/.local/bin:rw" \
             -v "$DATA_DIR/.claude-versions:/headless/.local/share/claude:rw" \
-            "$IMAGE" > /dev/null; then
+            "$image_id" > /dev/null; then
         echo "[ERROR] Could not start container $NAME."
         return 1
     fi
@@ -150,7 +172,7 @@ _start () {
 case "${1:-start}" in
     start)  _start ;;
     stop)   podman stop --ignore -t 10 "$NAME" > /dev/null && echo "[INFO] Container $NAME stopped." ;;
-    status) if _running; then echo "[INFO] Running: $(_url)"; else echo "[INFO] Not running."; fi ;;
+    status) if _running; then echo "[INFO] Running: $(_url)"; _check_image; else echo "[INFO] Not running."; fi ;;
     url)    if [ -n "$PORT" ]; then _url; else echo "[ERROR] User $(id -un) has no port in $PORTS_FILE."; exit 1; fi ;;
     newpw)  rm -f "$PW_FILE"; _make_password
             _running && echo "[HINT] Run \"$0 stop\" and \"$0 start\" to use the new password." ;;
